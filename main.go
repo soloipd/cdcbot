@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -22,24 +21,14 @@ func main() {
 		loadEnvironmentalVariables()
 	}
 
-	//log to file as well as stdout
-	f, err := os.OpenFile("output.txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("error opening file: %v", err)
-	}
-	defer f.Close()
-	mw := io.MultiWriter(os.Stdout, f)
-	log.SetOutput(mw)
-
 	//set up telegram info
 	bot, err := tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_TOKEN"))
 	errCheck(err, "Failed to start telegram bot")
 	log.Printf("Authorized on account %s", bot.Self.UserName)
-	/*chatID*/ _, err = strconv.ParseInt(os.Getenv("CHAT_ID"), 10, 64)
+	chatID, err := strconv.ParseInt(os.Getenv("CHAT_ID"), 10, 64)
 	errCheck(err, "Failed to fetch chat ID")
 
 	client := &http.Client{}
-	//sessionID := &http.Cookie{HttpOnly: true, Path: "/", Value: "bv5dpnizc41vlu45tsvy1cqs"}
 
 	//for heroku
 	go func() {
@@ -52,61 +41,21 @@ func main() {
 		log.Println("Logging in")
 		logIn(os.Getenv("LOGIN_ID"), os.Getenv("PASSWORD"), client)
 
-		//fetching the booking page
+		//fetching the booking page (client now has cookie stored inside a jar)
 		log.Println("Fetching booking page")
 		rawPage := slotPage(client)
-		log.Println(rawPage)
 
-		/*
-			req, err = http.NewRequest("POST", "http://www.bbdc.sg/bbdc/b-3c-pLessonBooking1.asp",
-				strings.NewReader(bookingForm().Encode()))
-			req.AddCookie(aspxanon)
-			req.AddCookie(sessionID)
-			req.AddCookie(&http.Cookie{Name: "language", Value: "en-US"})
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			errCheck(err, "Error creating get bookings request")
-			resp, err := client.Do(req)
-			errCheck(err, "Error fetching booking slots")
-			body, _ := ioutil.ReadAll(resp.Body)
-			//ioutil.WriteFile("booking.txt", body, 0644)
+		log.Println("Parsing booking page")
+		slots := extractDates(rawPage)
+		valids := validSlots(slots)
 
-			//parse booking page to get booking dates
-			//The data is hidden away in the following function call in the HTML page
-			//fetched:
-			//doTooltipV(event,0, "03/05/2019 (Fri)","3","11:30","13:10","BBDC");
-			log.Println("Parsing booking page")
-			foundSlot := false
-			substrs := strings.Split(string(body), "doTooltipV(")[1:]
-			for _, substr := range substrs {
-				bookingData := strings.Split(substr, ",")[0:6]
-				day := bookingData[2]
-				monthInt := day[5:7]
+		for _, validSlot := range valids { //for all the slots which meet the rule (i.e. within 10 days of now)
+			alert("Slot available on "+validSlot.Date.Format("_2 Jan 2006 (Mon)")+" "+os.Getenv("SESSION_"+validSlot.SessionNumber), bot, chatID)
+		}
+		if len(valids) != 0 {
+			alert("Finished getting slots", bot, chatID)
+		}
 
-				//sessionNum := bookingData[3]
-				validSlot := false
-				//weekendSlot := false
-
-				if strings.Contains(day, "Sat") || strings.Contains(day, "Sun") {
-					//weekendSlot = true
-				}
-
-				if monthInt == "04" || monthInt == "05" || monthInt == "06" {
-					alert("Slot available on "+day+" from "+bookingData[4]+" to "+bookingData[5],
-						bot, chatID)
-					foundSlot = true
-					validSlot = true
-				}
-
-				if validSlot {
-
-				}
-			}
-
-			if foundSlot {
-				alert("Finished getting slots", bot, chatID)
-			} else {
-				log.Println("No slots found")
-			}*/
 		r := rand.Intn(300) + 120
 		time.Sleep(time.Duration(r) * time.Second)
 	}
@@ -119,12 +68,37 @@ func alert(msg string, bot *tgbotapi.BotAPI, chatID int64) {
 	log.Println("Sent message to " + strconv.FormatInt(chatID, 10) + ": " + msg)
 }
 
+// AlertService is a service for alerting many telegram users
+type AlertService struct {
+	Bot         *tgbotapi.BotAPI
+	ReceiverIDs []int64
+}
+
+func (as *AlertService) messageAll(msg string) {
+	for _, chatID := range as.ReceiverIDs {
+		alert(msg, as.Bot, chatID)
+	}
+}
+
 func loadEnvironmentalVariables() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Print("Error loading environmental variables: ")
 		log.Fatal(err.Error())
 	}
+}
+
+// Returns which of the slots the user should be alerted about (ie valid slots)
+func validSlots(slots []DrivingSlot) []DrivingSlot {
+	valid := make([]DrivingSlot, 0)
+
+	for _, slot := range slots {
+		if slot.Date.Sub(time.Now()) < 10*(24*time.Hour) { //if slot is within 10 days of now
+			valid = append(valid, slot)
+		}
+	}
+
+	return valid
 }
 
 type myjar struct {
@@ -186,43 +160,55 @@ func slotPage(client *http.Client) string {
 	return string(bytes)
 }
 
-func paymentForm(slotID string) url.Values {
-	form := url.Values{}
-	form.Add("accId", os.Getenv("ACCOUNT_ID"))
-	form.Add("slot", slotID)
-
-	return form
+// DrivingSlot represents a CDC slot to go for driving lessons
+type DrivingSlot struct {
+	Date          time.Time
+	SessionNumber string
 }
 
-func bookingForm() url.Values {
-	bookingForm := url.Values{}
-	bookingForm.Add("accId", os.Getenv("ACCOUNT_ID"))
-	bookingForm.Add("Month", "Feb/2019")
-	bookingForm.Add("Month", "Mar/2019")
-	bookingForm.Add("Month", "Apr/2019")
-	bookingForm.Add("Month", "May/2019")
-	bookingForm.Add("Month", "Jun/2019")
-	bookingForm.Add("Session", "1")
-	bookingForm.Add("Session", "2")
-	bookingForm.Add("Session", "3")
-	bookingForm.Add("Session", "4")
-	bookingForm.Add("Session", "5")
-	bookingForm.Add("Session", "6")
-	bookingForm.Add("Session", "7")
-	bookingForm.Add("Session", "8")
-	bookingForm.Add("allSes", "on")
-	bookingForm.Add("Day", "2")
-	bookingForm.Add("Day", "3")
-	bookingForm.Add("Day", "4")
-	bookingForm.Add("Day", "5")
-	bookingForm.Add("Day", "6")
-	bookingForm.Add("Day", "7")
-	bookingForm.Add("Day", "1")
-	bookingForm.Add("allDay", "")
-	bookingForm.Add("defPLVenue", "1")
-	bookingForm.Add("optVenue", "1")
+// Given the output of the slot page, finds the
+func extractDates(slotPage string) []DrivingSlot {
+	daySections := strings.Split(slotPage, "</tr><tr>")[1:]
+	slots := make([]DrivingSlot, 0)
+	/* What a day section looks like
+		<td>17/Sep/2019</td><td align="center">TUE</td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession1" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession1" src="../Images/Class3/Images0.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession2" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession2" src="../Images/Class3/Images1.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession3" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession3" src="../Images/Class3/Images0.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession4" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession4" src="../Images/Class3/Images0.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession5" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession5" src="../Images/Class3/Images3.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession6" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession6" src="../Images/Class3/Images0.gif" style="border-width:0px;" />
+	                                                    </td><td align="center">
+	                                                        <input type="image" name="ctl00$ContentPlaceHolder1$gvLatestav$ctl02$btnSession7" id="ctl00_ContentPlaceHolder1_gvLatestav_ctl02_btnSession7" src="../Images/Class3/Images0.gif" style="border-width:0px;" />
+														</td>
+	*/
+	for _, daySection := range daySections {
+		dateString := strings.Split(strings.Split(daySection, "</td>")[0], "<td>")[1]
+		date, err := time.Parse("2/Jan/2006", dateString)
+		errCheck(err, "Error parsing date of slot")
+		rawSlots := strings.Split(daySection, `</td><td align="center">`)[2:] //exclude the first two to get to the actual cells in the table
+		for _, rawSlot := range rawSlots {
+			if openSlot(rawSlot) {
+				sessionNum := strings.Split(strings.Split(rawSlot, "btnSession")[1], `"`)[0]
+				log.Println(date, sessionNum)
+				slots = append(slots, DrivingSlot{
+					Date:          date,
+					SessionNumber: sessionNum,
+				})
+			}
+		}
+	}
+	return slots
+}
 
-	return bookingForm
+// Returns true if a given raw slot is open
+func openSlot(rawSlot string) bool {
+	return strings.Contains(rawSlot, "Images1.gif")
 }
 
 func errCheck(err error, msg string) {
