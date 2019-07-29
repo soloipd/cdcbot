@@ -25,10 +25,11 @@ func main() {
 	bot, err := tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_TOKEN"))
 	errCheck(err, "Failed to start telegram bot")
 	log.Printf("Authorized on account %s", bot.Self.UserName)
-	chatID, err := strconv.ParseInt(os.Getenv("CHAT_ID"), 10, 64)
-	errCheck(err, "Failed to fetch chat ID")
+	chatIDs, err := parseChatIDList((os.Getenv("CHAT_ID")))
+	errCheck(err, "Failed to fetch chat IDs")
 
 	client := &http.Client{}
+	tgclient := AlertService{Bot: bot, ReceiverIDs: chatIDs}
 
 	//for heroku
 	go func() {
@@ -50,16 +51,29 @@ func main() {
 		valids := validSlots(slots)
 
 		for _, validSlot := range valids { //for all the slots which meet the rule (i.e. within 10 days of now)
-			alert("Slot available on "+validSlot.Date.Format("_2 Jan 2006 (Mon)")+" "+os.Getenv("SESSION_"+validSlot.SessionNumber), bot, chatID)
+			tgclient.MessageAll("Slot available on " + validSlot.Date.Format("_2 Jan 2006 (Mon)") + " " + os.Getenv("SESSION_"+validSlot.SessionNumber))
 		}
 		if len(valids) != 0 {
-			alert("Finished getting slots", bot, chatID)
+			tgclient.MessageAll("Finished getting slots")
 		}
 
 		r := rand.Intn(300) + 120
 		time.Sleep(time.Duration(r) * time.Second)
 	}
 
+}
+
+func parseChatIDList(list string) ([]int64, error) {
+	chatIDStrings := strings.Split(list, ",")
+	chatIDs := make([]int64, len(chatIDStrings))
+	for i, chatIDString := range chatIDStrings {
+		chatID, err := strconv.ParseInt(strings.TrimSpace(chatIDString), 10, 64)
+		chatIDs[i] = chatID
+		if err != nil {
+			return nil, err
+		}
+	}
+	return chatIDs, nil
 }
 
 func alert(msg string, bot *tgbotapi.BotAPI, chatID int64) {
@@ -74,7 +88,8 @@ type AlertService struct {
 	ReceiverIDs []int64
 }
 
-func (as *AlertService) messageAll(msg string) {
+// Sends a message to all chats in the alert service
+func (as *AlertService) MessageAll(msg string) {
 	for _, chatID := range as.ReceiverIDs {
 		alert(msg, as.Bot, chatID)
 	}
